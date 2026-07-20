@@ -161,6 +161,10 @@ def index():
     # index.html을 같은 서버에서 서빙 → CORS 설정 불필요, 배포 시 주소 수정 불필요
     return send_from_directory(BASE_DIR, "index.html")
 
+@app.get("/images/<path:filename>")
+def images(filename):
+    # 이미지 파일도 서빙
+    return send_from_directory(BASE_DIR / "images", filename)
 
 @app.get("/songs")
 def songs():
