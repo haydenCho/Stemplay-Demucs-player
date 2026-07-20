@@ -23,6 +23,8 @@
     background: #3b82f6;
     color: white;
     cursor: pointer;
+    white-space: nowrap;   /* 버튼 텍스트가 줄바꿈되며 깨지지 않도록 */
+    flex-shrink: 0;        /* flex 컨테이너 안에서 버튼이 찌그러지지 않도록 */
   }
   button:disabled { background: #444; cursor: not-allowed; }
   #status { margin: 12px 0; color: #aaa; min-height: 1.2em; }
@@ -72,11 +74,22 @@
   #mixerHeader { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
   #mixerHeader button { background: #333; }
   #songTitle { font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ── 모바일: 메뉴 이름을 생략하고 이모지(기호)만 표시 ── */
+  @media (max-width: 480px) {
+    body { padding: 12px; }
+    .btn-text { display: none; }
+    button { padding: 8px 14px; }
+    .song-row { gap: 8px; padding: 10px 12px; }
+    .mixer-track { gap: 10px; padding: 10px 12px; }
+    .mixer-track label { width: auto; min-width: 1.6em; text-align: center; }
+    #mixerHeader, #transport { gap: 8px; }
+  }
 </style>
 </head>
 <body>
 
-<h1>🎸 stemplay <span style="font-size:0.85rem; font-weight:normal; color:#aaa;">밴드 음원 분리 플레이어</span></h1>
+<h1>🎸 stemplay <span class="btn-text" style="font-size:0.85rem; font-weight:normal; color:#aaa;">밴드 음원 분리 플레이어</span></h1>
 
 <div id="status"></div>
 
@@ -85,7 +98,7 @@
   <p style="display:flex; gap:8px;">
     <input type="url" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=..."
            style="flex:1; font-size:16px; padding:8px 12px; border-radius:6px; border:1px solid #444; background:#1e1e1e; color:#eee;">
-    <button id="uploadBtn" onclick="submitUrl()">곡 추가</button>
+    <button id="uploadBtn" onclick="submitUrl()">➕<span class="btn-text"> 곡 추가</span></button>
   </p>
 
   <div id="workerBanner">⚠️ 분리 PC(워커)가 꺼져 있습니다 — 새 곡 분리는 PC를 켠 뒤 시작됩니다. 이미 분리된 곡은 재생 가능합니다.</div>
@@ -94,18 +107,18 @@
   <div id="songList"></div>
 
   <p style="margin-top:24px; text-align:right;">
-    <button id="clearBtn" onclick="clearAll()" style="background:#dc2626; font-size:14px; padding:5px 12px;">전체 삭제</button>
+    <button id="clearBtn" onclick="clearAll()" style="background:#dc2626; font-size:14px; padding:5px 12px;">🗑️<span class="btn-text"> 전체 삭제</span></button>
   </p>
 </div>
 
 <!-- ══════════ 믹서 화면: 선택한 곡 재생 + 악기별 볼륨 ══════════ -->
 <div id="mixerView" style="display:none;">
   <div id="mixerHeader">
-    <button onclick="goHome()">← 곡 리스트</button>
+    <button onclick="goHome()">←<span class="btn-text"> 곡 리스트</span></button>
     <span id="songTitle"></span>
   </div>
   <div id="transport">
-    <button id="playBtn" onclick="togglePlay()">▶ 재생</button>
+    <button id="playBtn" onclick="togglePlay()">▶<span class="btn-text"> 재생</span></button>
     <input type="range" id="seek" min="0" max="0" step="0.1" value="0"
            oninput="seekTo(parseFloat(this.value))">
     <span id="time">0:00 / 0:00</span>
@@ -115,19 +128,25 @@
 
 <script>
 // 서버가 감지할 수 있는 전체 악기 목록 (htdemucs_6s 6-stem)
+// 모바일에서는 icon만, 그 외에는 icon + name으로 표시
 const TRACK_LABELS = {
-  vocals: '🎤 보컬',
-  drums:  '🥁 드럼',
-  bass:   '🎸 베이스',
-  guitar: '🎸 기타',
-  piano:  '🎹 피아노',
-  other:  '🎶 그 외',
+  vocals: { icon: '🎤', name: '보컬' },
+  drums:  { icon: '🥁', name: '드럼' },
+  bass:   { icon: '🎸', name: '베이스' },
+  guitar: { icon: '🎸', name: '기타' },
+  piano:  { icon: '🎹', name: '피아노' },
+  other:  { icon: '🎶', name: '그 외' },
 };
 const JOB_STATUS_LABELS = {
-  queued:     '⏳ 대기 중',
-  processing: '🎛️ 분리 중...',
-  failed:     '❌ 실패',
+  queued:     { icon: '⏳', name: '대기 중' },
+  processing: { icon: '🎛️', name: '분리 중...' },
+  failed:     { icon: '❌', name: '실패' },
 };
+
+// icon + <span class="btn-text">name</span> 형태의 HTML 생성 (모바일에서 name 숨김)
+function iconLabel(icon, name) {
+  return `${icon}<span class="btn-text"> ${name}</span>`;
+}
 const POLL_MS = 5000;   // 곡 리스트 갱신 간격
 
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -189,7 +208,9 @@ async function refreshSongs() {
 
     const sub = document.createElement('span');
     sub.className = 'sub';
-    sub.textContent = JOB_STATUS_LABELS[job.status] || job.status;
+    const st = JOB_STATUS_LABELS[job.status];
+    if (st) sub.innerHTML = iconLabel(st.icon, st.name);
+    else sub.textContent = job.status;
     row.appendChild(sub);
 
     if (job.status === 'failed') {
@@ -201,7 +222,7 @@ async function refreshSongs() {
         row.appendChild(err);
       }
       const retryBtn = document.createElement('button');
-      retryBtn.textContent = '재시도';
+      retryBtn.innerHTML = iconLabel('🔄', '재시도');
       retryBtn.onclick = () => submitVideoId(job.song_name);
       row.appendChild(retryBtn);
     }
@@ -221,7 +242,7 @@ async function refreshSongs() {
 
     const sub = document.createElement('span');
     sub.className = 'sub';
-    sub.textContent = `악기 ${song.tracks.length}개 ▶`;
+    sub.innerHTML = `<span class="btn-text">악기 </span>${song.tracks.length}<span class="btn-text">개</span> ▶`;
     row.appendChild(sub);
 
     list.appendChild(row);
@@ -297,7 +318,7 @@ async function openSong(song) {
     isPlaying = false;
     updateTransportUI();
 
-    const detected = trackIds.map(id => (TRACK_LABELS[id] || id).replace(/^\S+ /, '')).join(', ');
+    const detected = trackIds.map(id => TRACK_LABELS[id] ? TRACK_LABELS[id].name : id).join(', ');
     status.innerText = `감지된 악기: ${detected}`;
     document.getElementById('songTitle').textContent = song.title;
     showView('mixer');
@@ -318,8 +339,9 @@ function buildMixer(tracks) {
   trackIds.forEach(id => {
     const row = document.createElement('div');
     row.className = 'mixer-track';
+    const t = TRACK_LABELS[id] || { icon: '🎵', name: id };
     row.innerHTML = `
-      <label>${TRACK_LABELS[id] || id}</label>
+      <label>${iconLabel(t.icon, t.name)}</label>
       <input type="range" min="0" max="1" step="0.01" value="0.8"
              oninput="changeVolume('${id}', this.value)">`;
     tracksDiv.appendChild(row);
@@ -428,7 +450,8 @@ function updateTransportUI() {
   document.getElementById('seek').value = pos;
   document.getElementById('time').innerText =
     `${formatTime(pos)} / ${formatTime(duration)}`;
-  document.getElementById('playBtn').innerText = isPlaying ? '⏸ 일시정지' : '▶ 재생';
+  document.getElementById('playBtn').innerHTML =
+    isPlaying ? iconLabel('⏸', '일시정지') : iconLabel('▶', '재생');
 }
 
 setInterval(() => { if (isPlaying) updateTransportUI(); }, 200);
