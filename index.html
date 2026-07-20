@@ -54,6 +54,7 @@
   <input type="url" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=..."
          style="flex:1; font-size:16px; padding:8px 12px; border-radius:6px; border:1px solid #444; background:#1e1e1e; color:#eee;">
   <button id="uploadBtn" onclick="uploadAndProcess()">음원 분리 시작</button>
+  <button id="clearBtn" onclick="clearAll()" style="background:#dc2626;">음원 삭제</button>
 </p>
 
 <div id="status"></div>
@@ -163,6 +164,37 @@ async function uploadAndProcess() {
     status.innerText = '오류: ' + err.message;
   } finally {
     uploadBtn.disabled = false;
+  }
+}
+
+// ── 서버에 저장된 음원 전체 삭제 ─────────────────────────────
+async function clearAll() {
+  if (!confirm('서버에 저장된 모든 음원(다운로드 원본 + 분리 결과)을 삭제할까요?')) return;
+
+  const status = document.getElementById('status');
+  const clearBtn = document.getElementById('clearBtn');
+  clearBtn.disabled = true;
+
+  try {
+    const response = await fetch('/clear', { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '서버 오류');
+
+    // 재생 중이던 곡도 함께 정리하고 믹서를 숨긴다
+    stopSources();
+    Object.values(gains).forEach(g => g.disconnect());
+    trackIds = [];
+    buffers = {};
+    gains = {};
+    duration = 0;
+    pausedAt = 0;
+    isPlaying = false;
+    document.getElementById('mixer').style.display = 'none';
+    status.innerText = '서버의 모든 음원을 삭제했습니다.';
+  } catch (err) {
+    status.innerText = '오류: ' + err.message;
+  } finally {
+    clearBtn.disabled = false;
   }
 }
 

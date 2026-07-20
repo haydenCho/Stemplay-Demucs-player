@@ -6,6 +6,7 @@
 """
 import json
 import re
+import shutil
 import sys
 import subprocess
 from pathlib import Path
@@ -116,6 +117,18 @@ def process():
         "tracks": [{"id": t, "file": f"{t}.{EXT}"} for t in meta["tracks"]],
         "cached": cached,
     })
+
+
+@app.post("/clear")
+def clear():
+    # 디렉토리 자체는 남기고 내용물만 전부 삭제 (캐시 초기화)
+    for base in (UPLOAD_DIR, OUTPUT_DIR):
+        for child in base.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    return jsonify({"ok": True})
 
 
 @app.get("/audio/<song_name>/<track_name>")
