@@ -30,6 +30,13 @@ DOMAIN="stemplay.greatsounds.me"
 
 echo
 echo "🎸 전체 배포 완료!"
-echo "  브라우저에서 접속: https://$DOMAIN (HTTPS 미적용 시 http://$DOMAIN)"
+if sudo test -d "/etc/letsencrypt/live/$DOMAIN"; then
+    echo "  브라우저에서 접속: https://$DOMAIN"
+else
+    echo "  브라우저에서 접속: http://$DOMAIN"
+    echo "  🔒 SSL 인증서 설정 (HTTPS 적용):"
+    echo "     sudo apt-get install -y certbot python3-certbot-nginx"
+    echo "     sudo certbot --nginx -d $DOMAIN"
+fi
 echo "  백엔드 로그:  journalctl -u stemplay -f"
 echo "  nginx 로그:   sudo tail -f /var/log/nginx/access.log"

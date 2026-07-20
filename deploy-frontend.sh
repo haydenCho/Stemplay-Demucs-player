@@ -2,17 +2,20 @@
 # 프론트엔드 배포 스크립트 — nginx로 정적 파일(index.html, 오디오) 직접 서빙
 #
 # 사용법:
-#   ./deploy-frontend.sh            # nginx 설정 생성/갱신 후 적용
-#   ./deploy-frontend.sh --force    # certbot이 수정한 기존 설정도 덮어쓰기
+#   ./deploy-frontend.sh            # nginx 설정이 없을 때만 새로 생성 후 적용
+#   ./deploy-frontend.sh --force    # 기존 설정을 덮어쓰고 새로 생성
 #   (보통은 통합 스크립트 ./deploy.sh 로 백엔드와 함께 배포한다)
 #
 # 하는 일:
 #   - nginx 설치 (없을 때만)
-#   - /etc/nginx/sites-enabled/stemplay.greatsounds.me.conf 셋업:
+#   - /etc/nginx/sites-enabled/stemplay.greatsounds.me.conf 셋업 (파일이 없을 때만):
 #       * index.html과 separated/의 분리된 오디오 → nginx가 직접 서빙
 #       * /process, /clear API → 백엔드 gunicorn(127.0.0.1:5000)으로 프록시
-#   - Let's Encrypt 인증서가 이미 있으면 HTTPS(443) + HTTP→HTTPS 리다이렉트 구성,
-#     없으면 HTTP(80)로 구성하고 certbot 실행 방법을 안내
+#       * Let's Encrypt 인증서가 이미 있으면 HTTPS(443) + HTTP→HTTPS 리다이렉트,
+#         없으면 HTTP(80)로 구성
+#   - 설정 파일이 이미 있으면 그대로 보존한다 (certbot이 수정한 내용 등 유지).
+#     덮어쓰려면 --force 사용.
+#   - HTTPS 미적용 상태면 SSL 인증서 설정(certbot) 커맨드를 출력
 #
 # DNS: stemplay.greatsounds.me → 13.124.156.125 (A 레코드) 가 등록되어 있어야 한다.
 
@@ -59,7 +62,13 @@ else
     info "파일 접근 권한 확인 완료"
 fi
 
-# ── 4. nginx 사이트 설정 생성 ────────────────────────────────────────
+# ── 4. nginx 사이트 설정 생성 (파일이 없을 때만) ─────────────────────
+# 이미 설정 파일이 있으면 절대 건드리지 않는다 — certbot이 붙인 HTTPS 설정이나
+# 수동 수정 내용을 재배포가 덮어쓰지 않도록. 새로 만들려면 --force.
+if [ -f "$CONF_AVAILABLE" ] && [ "${1:-}" != "--force" ]; then
+    info "기존 nginx 설정 보존: $CONF_AVAILABLE (덮어쓰려면 --force)"
+else
+
 # 공통 부분: 정적 파일은 nginx가 직접, API만 백엔드로 프록시.
 # (heredoc 안의 \$ 는 nginx 변수를 위한 이스케이프)
 LOCATIONS=$(cat <<EOF
@@ -108,9 +117,6 @@ server {
 $LOCATIONS
 }
 EOF
-elif [ -f "$CONF_AVAILABLE" ] && grep -q "listen 443" "$CONF_AVAILABLE" && [ "${1:-}" != "--force" ]; then
-    # certbot --nginx 가 이 파일을 수정해 HTTPS를 붙인 경우 덮어쓰지 않는다
-    info "기존 설정에 HTTPS(443)가 적용되어 있어 보존합니다. (덮어쓰려면 --force)"
 else
     info "HTTP(80) 설정 작성: $CONF_AVAILABLE"
     sudo tee "$CONF_AVAILABLE" >/dev/null <<EOF
@@ -122,6 +128,8 @@ $LOCATIONS
 }
 EOF
 fi
+
+fi  # 설정 파일 생성 끝
 
 sudo ln -sf "$CONF_AVAILABLE" "$CONF_ENABLED"
 
@@ -138,8 +146,11 @@ if curl -s -o /dev/null -H "Host: $DOMAIN" "http://127.0.0.1/"; then
         echo "  접속 주소: https://$DOMAIN"
     else
         echo "  접속 주소: http://$DOMAIN"
-        echo "  HTTPS 적용: sudo certbot --nginx -d $DOMAIN"
-        echo "  (certbot 미설치 시: sudo apt-get install -y certbot python3-certbot-nginx)"
+        echo
+        echo "🔒 SSL 인증서 설정 (HTTPS 적용) — 아래 커맨드를 실행하세요:"
+        echo "  sudo apt-get install -y certbot python3-certbot-nginx"
+        echo "  sudo certbot --nginx -d $DOMAIN"
+        echo "  (인증서 자동 갱신은 certbot이 systemd 타이머로 등록해 줍니다)"
     fi
 else
     echo
