@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stemplay — 밴드 음원 분리 플레이어</title>
+<style>
+  body {
+    font-family: sans-serif;
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 24px;
+    background: #121212;
+    color: #eee;
+  }
+  h1 { font-size: 1.4rem; }
+  button {
+    font-size: 16px;
+    padding: 8px 18px;
+    border: none;
+    border-radius: 6px;
+    background: #3b82f6;
+    color: white;
+    cursor: pointer;
+  }
+  button:disabled { background: #444; cursor: not-allowed; }
+  #status { margin: 12px 0; color: #aaa; min-height: 1.2em; }
+  .mixer-track {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 14px 0;
+    background: #1e1e1e;
+    padding: 12px 16px;
+    border-radius: 8px;
+  }
+  .mixer-track label { width: 90px; font-weight: bold; }
+  .mixer-track input[type="range"] { flex: 1; }
+  #transport {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 20px 0;
+  }
+  #seek { flex: 1; }
+  #time { font-variant-numeric: tabular-nums; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>🎸 stemplay <span style="font-size:0.85rem; font-weight:normal; color:#aaa;">밴드 음원 분리 플레이어</span></h1>
+
+<p style="display:flex; gap:8px;">
+  <input type="url" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=..."
+         style="flex:1; font-size:16px; padding:8px 12px; border-radius:6px; border:1px solid #444; background:#1e1e1e; color:#eee;">
+  <button id="uploadBtn" onclick="uploadAndProcess()">음원 분리 시작</button>
+</p>
+
+<div id="status"></div>
+
+<div id="mixer" style="display:none;">
+  <div id="transport">
+    <button id="playBtn" onclick="togglePlay()">▶ 재생</button>
+    <input type="range" id="seek" min="0" max="0" step="0.1" value="0"
+           oninput="seekTo(parseFloat(this.value))">
+    <span id="time">0:00 / 0:00</span>
+  </div>
+  <div id="tracks"></div>
+</div>
+
+<script>
+// 서버가 감지할 수 있는 전체 악기 목록 (htdemucs_6s 6-stem)
+const TRACK_LABELS = {
+  vocals: '🎤 보컬',
+  drums:  '🥁 드럼',
+  bass:   '🎸 베이스',
+  guitar: '🎸 기타',
+  piano:  '🎹 피아노',
+  other:  '🎶 그 외',
+};
+
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+let trackIds = [];    // 현재 곡에서 감지된 악기 id 목록 (서버 응답으로 결정)
+let buffers = {};     // track id → AudioBuffer
+let gains = {};       // track id → GainNode
+let sources = {};     // track id → AudioBufferSourceNode (재생할 때마다 새로 생성)
+let duration = 0;
+let pausedAt = 0;     // 일시정지된 재생 위치(초)
+let startedAt = 0;    // 재생 시작 시점의 audioCtx.currentTime
+let isPlaying = false;
+
+// ── 감지된 악기별 볼륨 슬라이더 UI 생성 (곡을 불러올 때마다 재구성) ──
+function buildMixer(tracks) {
+  const tracksDiv = document.getElementById('tracks');
+  tracksDiv.innerHTML = '';
+  Object.values(gains).forEach(g => g.disconnect());
+  gains = {};
+  buffers = {};
+  trackIds = tracks.map(t => t.id);
+
+  trackIds.forEach(id => {
+    const row = document.createElement('div');
+    row.className = 'mixer-track';
+    row.innerHTML = `
+      <label>${TRACK_LABELS[id] || id}</label>
+      <input type="range" min="0" max="1" step="0.01" value="0.8"
+             oninput="changeVolume('${id}', this.value)">`;
+    tracksDiv.appendChild(row);
+
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0.8;
+    gain.connect(audioCtx.destination);
+    gains[id] = gain;
+  });
+}
+
+// ── 유튜브 다운로드 및 음원 분리 ─────────────────────────────
+async function uploadAndProcess() {
+  const url = document.getElementById('youtubeUrl').value.trim();
+  if (!url) return alert('유튜브 링크를 입력해주세요.');
+
+  const status = document.getElementById('status');
+  const uploadBtn = document.getElementById('uploadBtn');
+  uploadBtn.disabled = true;
+
+  try {
+    status.innerText = '유튜브에서 음원을 받아 AI가 악기를 분리하고 있습니다... (곡 길이에 따라 1~5분 소요)';
+
+    // 같은 서버에서 서빙되므로 상대 경로로 요청 (배포 시 수정 불필요)
+    const response = await fetch('/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '서버 오류');
+
+    status.innerText = (data.cached
+      ? '이미 분리된 곡입니다. 오디오를 불러오는 중...'
+      : '분리 완료! 오디오 데이터를 불러오는 중...') + ` — ${data.title}`;
+
+    stopSources();
+    buildMixer(data.tracks);
+
+    // 감지된 트랙을 병렬로 다운로드 + 디코딩
+    await Promise.all(data.tracks.map(async ({ id, file }) => {
+      const res = await fetch(`/audio/${encodeURIComponent(data.song_name)}/${file}`);
+      if (!res.ok) throw new Error(`${id} 트랙 로드 실패`);
+      buffers[id] = await audioCtx.decodeAudioData(await res.arrayBuffer());
+    }));
+
+    duration = Math.max(...trackIds.map(id => buffers[id].duration));
+    document.getElementById('seek').max = duration;
+    pausedAt = 0;
+    isPlaying = false;
+    updateTransportUI();
+
+    const detected = trackIds.map(id => (TRACK_LABELS[id] || id).replace(/^\S+ /, '')).join(', ');
+    status.innerText = `재생 준비 완료! — ${data.title} (감지된 악기: ${detected})`;
+    document.getElementById('mixer').style.display = 'block';
+  } catch (err) {
+    status.innerText = '오류: ' + err.message;
+  } finally {
+    uploadBtn.disabled = false;
+  }
+}
+
+// ── 재생 제어 (일시정지해도 재생 위치가 유지됨) ────────────────
+function playFrom(offset) {
+  trackIds.forEach(id => {
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffers[id];
+    src.connect(gains[id]);
+    src.start(0, offset);          // 모든 트랙을 동일 시점에 시작 → 완벽 동기화
+    sources[id] = src;
+  });
+  // 가장 긴 트랙이 자연스럽게 끝났을 때 처음으로 되감기
+  const longest = trackIds.reduce((a, b) => buffers[a].duration >= buffers[b].duration ? a : b);
+  sources[longest].onended = () => {
+    isPlaying = false;
+    pausedAt = 0;
+    sources = {};
+    updateTransportUI();
+  };
+  startedAt = audioCtx.currentTime;
+  pausedAt = offset;
+  isPlaying = true;
+  updateTransportUI();
+}
+
+function stopSources() {
+  Object.values(sources).forEach(src => {
+    src.onended = null;            // 수동 정지는 '곡 종료'로 취급하지 않음
+    try { src.stop(); } catch (e) { /* 이미 정지된 경우 무시 */ }
+  });
+  sources = {};
+}
+
+function getPosition() {
+  const pos = isPlaying ? pausedAt + (audioCtx.currentTime - startedAt) : pausedAt;
+  return Math.min(pos, duration);
+}
+
+function togglePlay() {
+  if (!trackIds.length || !buffers[trackIds[0]]) return;
+  if (isPlaying) {
+    pausedAt = getPosition();
+    stopSources();
+    isPlaying = false;
+    updateTransportUI();
+  } else {
+    audioCtx.resume();
+    playFrom(pausedAt >= duration ? 0 : pausedAt);
+  }
+}
+
+function seekTo(t) {
+  if (!trackIds.length || !buffers[trackIds[0]]) return;
+  if (isPlaying) {
+    stopSources();
+    playFrom(t);
+  } else {
+    pausedAt = t;
+    updateTransportUI();
+  }
+}
+
+function changeVolume(track, value) {
+  gains[track].gain.value = value;
+}
+
+// ── 재생 위치 표시 ───────────────────────────────────────────
+function formatTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function updateTransportUI() {
+  const pos = getPosition();
+  document.getElementById('seek').value = pos;
+  document.getElementById('time').innerText =
+    `${formatTime(pos)} / ${formatTime(duration)}`;
+  document.getElementById('playBtn').innerText = isPlaying ? '⏸ 일시정지' : '▶ 재생';
+}
+
+setInterval(() => { if (isPlaying) updateTransportUI(); }, 200);
+</script>
+
+</body>
+</html>
