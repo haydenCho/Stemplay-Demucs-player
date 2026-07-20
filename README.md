@@ -1,4 +1,4 @@
-# 🎸 stemplay
+# 🎸 stemplay v2 — EC2 + 홈 PC 워커 구조
 
 > 밴드 음원 분리 플레이어 — 유튜브 곡을 악기별 스템으로 분리해 브라우저에서 믹싱하며 듣는다.
 
@@ -7,72 +7,154 @@
 분리 후 트랙별 평균 음량을 측정해 **실제로 연주되는 악기만 감지**하여
 웹 페이지에 표시하고, 악기별 볼륨을 조절하며 감상할 수 있다.
 
-## 설치 (WSL Ubuntu 24.04)
+## v2에서 바뀐 것 — 왜 두 대로 나누나
 
-```bash
-cd ~/Music/band-mixer
-./setup.sh                # 설치 후 바로 서버 실행
-./setup.sh --setup-only   # 설치만 수행
+v1은 서버 한 대가 다운로드·분리·서빙을 전부 담당했다. 그런데 **유튜브가
+EC2(데이터센터) IP의 다운로드를 차단**해서 EC2 단독 운영이 불가능해졌다.
+그래서 역할을 둘로 나눈다.
+
+| 역할 | 담당 | 이유 |
+|------|------|------|
+| 웹 서빙 + 작업 큐 + 분리 결과 저장/제공 | **EC2** | 항상 켜져 있고 외부에서 접속 가능 |
+| 유튜브 다운로드 + Demucs 분리 | **홈 PC (WSL)** | 가정용 IP라 유튜브 차단이 없고, GPU로 분리가 빠름 |
+
+홈 PC는 공유기 NAT 뒤에 있어 EC2가 먼저 접속할 수 없다. 그래서 PC 쪽 워커가
+EC2에 **주기적으로 폴링(pull)** 하는 방식을 쓴다 — 아웃바운드 연결만 사용하므로
+포트포워딩이나 터널 없이 동작한다.
+
+```
+[브라우저] ──링크 제출──> [EC2: server.py]              [홈 PC(WSL): worker.py]
+     │                      ├ 캐시 있으면 즉시 응답          │
+     │                      ├ 없으면 작업 큐에 등록  <──폴링(수 초 간격)──┤
+     │<──상태 폴링──────────┤                                ├ yt-dlp 다운로드
+     │                      │                                ├ Demucs 분리 + 악기 감지
+     │<──재생(/audio)───────┤ <──스템 mp3 + meta.json 업로드──┘
 ```
 
-`setup.sh`가 시스템 패키지(ffmpeg, python3-venv), 가상환경 생성,
-파이썬 의존성 설치, 서버 실행까지 한 번에 처리한다.
-여러 번 실행해도 안전하며, 이미 설치된 항목은 건너뛰고 바로 서버가 뜬다.
-서버 실행 전에 **기존에 떠 있던 서버 프로세스를 자동으로 종료**하므로
-재시작 용도로도 그냥 `./setup.sh`를 다시 실행하면 된다.
+**흐름**: 메인 화면은 **유튜브 링크 입력창 + 들을 수 있는 곡 리스트**다.
+리스트는 EC2에 이미 분리·저장된 곡들(제목 표시)이고, 곡을 선택하면
+해당 곡의 **믹서 화면**으로 넘어가 악기별 볼륨을 조절하며 들을 수 있다.
+새 링크를 제출하면 EC2는 캐시를 확인해서 이미 분리된 곡이면 바로 믹서 화면을
+열고, 아니면 작업 큐에 등록만 하고 즉시 응답한다(`queued`). 리스트에는
+"분리 중..." 상태로 표시되며, 홈 PC의 워커가 큐에서 작업을 가져가
+다운로드·분리를 마치고 결과 mp3들을 EC2에 업로드하면 들을 수 있는 곡으로 바뀐다.
 
-> GPU(NVIDIA + CUDA)가 있으면 분리 속도가 수십 배 빨라진다.
-> CPU만 있어도 동작은 하며, 4분짜리 곡 기준 수 분 정도 걸린다.
+**트레이드오프**: 홈 PC가 꺼져 있으면 **새 곡 분리만 안 된다.**
+이미 분리된 곡은 EC2가 캐시에서 서빙하므로 언제든 재생 가능하다.
+워커가 일정 시간 이상 접속하지 않으면 웹 페이지에 "분리 PC가 꺼져 있습니다"를 표시한다.
 
-## 실행
-
-```bash
-./setup.sh                # 설치 확인 후 서버를 백그라운드로 실행 (평소에도 이걸로 실행/재시작)
-
-# 로그 확인
-tail -f server.log
-
-# 서버 종료
-pkill -f 'python3? .*server\.py'
-
-# 포그라운드로 직접 실행하고 싶다면
-source .venv/bin/activate
-python server.py
-```
-
-브라우저에서 **http://localhost:5000** 접속 → 유튜브 링크 입력 → 슬라이더로 믹싱.
-
-- 첫 실행 시 htdemucs_6s 모델(약 80MB)이 `~/.cache/torch/`에 자동 다운로드된다.
-- 한 번 분리한 곡은 영상 ID 기준으로 `separated/` 폴더에 캐싱되어,
-  같은 링크를 다시 입력하면 즉시 로드된다.
-- WSL의 경우 윈도우 브라우저에서 `localhost:5000`으로 바로 접속 가능하다.
-
-## 폴더 구조
+## 구성 요소
 
 ```
 band-mixer/
-├── server.py          # Flask 백엔드 (yt-dlp 다운로드 → Demucs 실행 → 악기 감지 → 오디오 서빙)
-├── index.html         # 프론트엔드 (Web Audio API 멀티트랙 동기 재생 믹서)
-├── uploads/           # 다운로드 원본 mp3 (자동 생성)
-└── separated/         # 분리 결과 mp3 (자동 생성, 캐시 역할)
+├── server.py          # EC2용 Flask 서버 (웹 서빙 + 작업 큐 + 결과 저장/제공)
+│                      #   torch/demucs/yt-dlp 불필요 → t2.micro에서도 가볍게 동작
+├── worker.py          # 홈 PC용 워커 (큐 폴링 → yt-dlp → Demucs → 악기 감지 → 업로드)
+├── index.html         # 프론트엔드 단일 페이지 — 두 개의 화면
+│                      #   ① 메인: 링크 입력 + 곡 리스트 (분리 완료/분리 중 표시)
+│                      #   ② 믹서: 선택한 곡을 Web Audio API 멀티트랙 동기 재생 + 볼륨 조절
+├── uploads/           # [PC] 다운로드 원본 mp3 (자동 생성)
+└── separated/         # [EC2] 분리 결과 저장소 = 캐시 (자동 생성)
     └── htdemucs_6s/<영상ID>/{vocals,drums,bass,guitar,piano,other}.mp3 + meta.json
 ```
 
+### API
+
+| 엔드포인트 | 누가 호출 | 역할 |
+|------------|-----------|------|
+| `GET /` | 브라우저 | index.html 서빙 |
+| `GET /songs` | 브라우저 | 곡 리스트 — 분리 완료된 곡(영상ID, 제목, 트랙)과 진행 중인 작업(상태 포함) |
+| `POST /process` | 브라우저 | 캐시 히트 → 재생 정보 반환 / 미스 → 큐 등록 후 `queued` 반환 |
+| `GET /status/<영상ID>` | 브라우저 | 작업 상태 확인 (`queued` / `processing` / `done` / `failed`) |
+| `GET /audio/<영상ID>/<트랙>` | 브라우저 | 분리된 스템 mp3 서빙 |
+| `GET /worker/job` | 워커 | 대기 중인 작업 하나 가져가기 (없으면 204) |
+| `POST /worker/result/<영상ID>` | 워커 | 스템 mp3 + meta.json 멀티파트 업로드 |
+| `POST /worker/fail/<영상ID>` | 워커 | 실패 보고 (에러 메시지 포함) |
+
+`/worker/*` 엔드포인트는 공유 시크릿 토큰(`X-Worker-Token` 헤더)으로 인증한다.
+토큰은 EC2와 PC 양쪽에서 환경변수 `WORKER_TOKEN`으로 설정하며, 값이 일치해야 한다.
+
+## 설치 및 실행
+
+### 1. EC2 (서버)
+
+분리 작업을 하지 않으므로 Flask만 있으면 된다. torch, demucs, yt-dlp, ffmpeg 전부 불필요.
+
+```bash
+cd ~/band-mixer
+python3 -m venv .venv && source .venv/bin/activate
+pip install flask gunicorn
+
+export WORKER_TOKEN='아무거나-길고-추측불가능한-문자열'
+gunicorn -b 0.0.0.0:5000 server:app
+```
+
+- 보안 그룹에서 5000 포트를 **내 IP + 집 IP**에만 열 것
+  (브라우저 접속용 + 워커 폴링용. 나만 쓰는 서비스이므로 전체 공개 금지).
+- 분리 작업이 서버에서 빠졌으므로 gunicorn timeout을 길게 잡을 필요가 없다.
+
+### 2. 홈 PC — WSL Ubuntu (워커)
+
+```bash
+cd ~/Music/band-mixer
+./setup.sh --setup-only        # ffmpeg, venv, yt-dlp, demucs(torch) 설치
+
+source .venv/bin/activate
+export EC2_URL='http://<EC2-주소>:5000'
+export WORKER_TOKEN='EC2와 동일한 문자열'
+python worker.py
+```
+
+- 워커는 무한 루프로 EC2를 폴링한다. 백그라운드로 띄우려면:
+  `nohup python worker.py > worker.log 2>&1 &`
+- 첫 분리 시 htdemucs_6s 모델(약 80MB)이 `~/.cache/torch/`에 자동 다운로드된다.
+- GPU(NVIDIA + CUDA)가 있으면 분리가 수십 배 빠르다. CPU만으로도 동작은 한다.
+
+### 3. 사용
+
+브라우저에서 **http://\<EC2-주소\>:5000** 접속.
+
+- **메인 화면**: 들을 수 있는 곡 리스트가 뜬다. 곡을 선택하면 믹서 화면으로 넘어간다.
+- **새 곡 추가**: 메인 화면 상단 입력창에 유튜브 링크를 넣으면 리스트에
+  "분리 중..." 항목으로 추가되고, 완료되면 들을 수 있는 곡으로 바뀐다
+  (GPU 기준 1~2분, CPU 기준 수 분). 이미 분리한 곡의 링크면 바로 믹서가 열린다.
+- **믹서 화면**: 감지된 악기별 볼륨 슬라이더로 조절하며 재생.
+  리스트로 돌아가 다른 곡을 고를 수 있다.
+- 홈 PC 워커가 꺼져 있으면 새 곡 요청 시 안내 메시지가 뜬다.
+  이미 분리된 곡 재생은 워커와 무관하게 항상 가능하다.
+
+## 로컬 개발 (단일 머신)
+
+서버와 워커를 같은 PC에서 둘 다 띄우면 v1처럼 로컬 단독으로 쓸 수 있다.
+
+```bash
+# 터미널 1
+export WORKER_TOKEN=dev
+python server.py
+
+# 터미널 2
+export EC2_URL='http://localhost:5000'
+export WORKER_TOKEN=dev
+python worker.py
+```
+
+브라우저에서 http://localhost:5000 접속. WSL의 경우 윈도우 브라우저에서 바로 접속 가능하다.
+
 ## 배포 시 참고
 
-**공통**: `index.html`을 Flask가 직접 서빙하므로(same-origin) CORS 설정이나
-프론트엔드의 서버 주소 수정이 필요 없다. 접속 주소만 바뀐다.
+- `index.html`은 Flask가 직접 서빙하므로(same-origin) CORS 설정이나
+  프론트엔드의 서버 주소 수정이 필요 없다. 접속 주소만 바뀐다.
+- 집 IP가 유동 IP라면 바뀔 때마다 EC2 보안 그룹의 워커용 규칙을 갱신해야 한다.
+- EC2 디스크: 곡 하나당 스템 mp3 6개, 약 30~60MB. 오래된 곡 정리는
+  `separated/` 아래 폴더를 지우면 된다 (다시 요청하면 재분리).
 
-**EC2**
-- 보안 그룹에서 5000 포트를 **내 IP에만** 열 것 (나만 쓰는 서비스이므로).
-- 상시 운영 시 `debug=True`를 끄고 gunicorn 사용 권장:
-  `pip install gunicorn && gunicorn -b 0.0.0.0:5000 --timeout 600 server:app`
-  (분리 작업이 길어서 timeout을 넉넉하게 잡아야 함)
-- t2.micro 같은 저사양 인스턴스에서는 Demucs 실행 시 메모리 부족이 날 수 있다.
+## v1과의 차이 요약
 
-**라즈베리파이**
-- 파이에서 Demucs 분리는 매우 느리다(곡당 수십 분). **PC(WSL)에서 미리 분리한 뒤
-  `separated/` 폴더째 복사**하면, 파이는 재생 서버 역할만 하므로 쾌적하다.
-  캐시 히트로 처리되어 업로드 즉시 재생된다.
-- torch 설치는 CPU 전용 버전 사용:
-  `pip install torch --index-url https://download.pytorch.org/whl/cpu`
+| | v1 (`README_v1.md`) | v2 (현재) |
+|---|---|---|
+| 다운로드·분리 위치 | 서버 본인 | 홈 PC 워커 |
+| EC2 요구 사양 | torch 구동 가능해야 함 (메모리 부족 이슈) | Flask만 (t2.micro 충분) |
+| 유튜브 차단 | EC2에서 다운로드 실패 | 가정용 IP라 문제없음 |
+| `/process` 응답 | 분리가 끝날 때까지 대기 (동기) | 즉시 `queued` 반환, 상태 폴링 (비동기) |
+| 프론트엔드 | 링크 입력 → 그 곡만 재생 | 곡 리스트에서 선택해 재생 + 링크 입력으로 곡 추가 |
+| 새 곡 분리 가능 시간 | 서버가 켜져 있으면 항상 | 홈 PC 워커가 켜져 있을 때만 |
