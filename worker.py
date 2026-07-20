@@ -87,6 +87,7 @@ def separate(video_id: str) -> dict:
         sys.executable, "-m", "yt_dlp",
         "-x", "--audio-format", "mp3",
         "--no-playlist",
+        "--js-runtimes", "node",                # 유튜브 추출용 JS 런타임 (run.sh가 node 설치)
         "--no-simulate", "--print", "title",    # 다운로드하면서 곡 제목도 출력
         "-o", str(UPLOAD_DIR / f"{video_id}.%(ext)s"),
         f"https://www.youtube.com/watch?v={video_id}",

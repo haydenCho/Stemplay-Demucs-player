@@ -14,6 +14,7 @@
     color: #eee;
   }
   h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.05rem; color: #ccc; margin: 24px 0 8px; }
   button {
     font-size: 16px;
     padding: 8px 18px;
@@ -25,6 +26,30 @@
   }
   button:disabled { background: #444; cursor: not-allowed; }
   #status { margin: 12px 0; color: #aaa; min-height: 1.2em; }
+  #workerBanner {
+    display: none;
+    margin: 12px 0;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: #3a2a12;
+    color: #fbbf24;
+  }
+  .song-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 8px 0;
+    background: #1e1e1e;
+    padding: 12px 16px;
+    border-radius: 8px;
+  }
+  .song-row.playable { cursor: pointer; }
+  .song-row.playable:hover { background: #2a2a2a; }
+  .song-row .title { flex: 1; font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .song-row .sub { color: #888; font-size: 0.85rem; flex-shrink: 0; }
+  .song-row .error { color: #f87171; font-size: 0.85rem; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .song-row button { font-size: 14px; padding: 5px 12px; }
+  #emptyList { color: #666; padding: 16px 0; }
   .mixer-track {
     display: flex;
     align-items: center;
@@ -44,22 +69,41 @@
   }
   #seek { flex: 1; }
   #time { font-variant-numeric: tabular-nums; color: #aaa; }
+  #mixerHeader { display: flex; align-items: center; gap: 12px; margin: 16px 0; }
+  #mixerHeader button { background: #333; }
+  #songTitle { font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
 
 <h1>🎸 stemplay <span style="font-size:0.85rem; font-weight:normal; color:#aaa;">밴드 음원 분리 플레이어</span></h1>
 
-<p style="display:flex; gap:8px;">
-  <input type="url" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=..."
-         style="flex:1; font-size:16px; padding:8px 12px; border-radius:6px; border:1px solid #444; background:#1e1e1e; color:#eee;">
-  <button id="uploadBtn" onclick="uploadAndProcess()">음원 분리 시작</button>
-  <button id="clearBtn" onclick="clearAll()" style="background:#dc2626;">음원 삭제</button>
-</p>
-
 <div id="status"></div>
 
-<div id="mixer" style="display:none;">
+<!-- ══════════ 메인 화면: 링크 입력 + 곡 리스트 ══════════ -->
+<div id="homeView">
+  <p style="display:flex; gap:8px;">
+    <input type="url" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=..."
+           style="flex:1; font-size:16px; padding:8px 12px; border-radius:6px; border:1px solid #444; background:#1e1e1e; color:#eee;">
+    <button id="uploadBtn" onclick="submitUrl()">곡 추가</button>
+  </p>
+
+  <div id="workerBanner">⚠️ 분리 PC(워커)가 꺼져 있습니다 — 새 곡 분리는 PC를 켠 뒤 시작됩니다. 이미 분리된 곡은 재생 가능합니다.</div>
+
+  <h2>곡 리스트</h2>
+  <div id="songList"></div>
+
+  <p style="margin-top:24px; text-align:right;">
+    <button id="clearBtn" onclick="clearAll()" style="background:#dc2626; font-size:14px; padding:5px 12px;">전체 삭제</button>
+  </p>
+</div>
+
+<!-- ══════════ 믹서 화면: 선택한 곡 재생 + 악기별 볼륨 ══════════ -->
+<div id="mixerView" style="display:none;">
+  <div id="mixerHeader">
+    <button onclick="goHome()">← 곡 리스트</button>
+    <span id="songTitle"></span>
+  </div>
   <div id="transport">
     <button id="playBtn" onclick="togglePlay()">▶ 재생</button>
     <input type="range" id="seek" min="0" max="0" step="0.1" value="0"
@@ -79,6 +123,12 @@ const TRACK_LABELS = {
   piano:  '🎹 피아노',
   other:  '🎶 그 외',
 };
+const JOB_STATUS_LABELS = {
+  queued:     '⏳ 대기 중',
+  processing: '🎛️ 분리 중...',
+  failed:     '❌ 실패',
+};
+const POLL_MS = 5000;   // 곡 리스트 갱신 간격
 
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
@@ -90,6 +140,171 @@ let duration = 0;
 let pausedAt = 0;     // 일시정지된 재생 위치(초)
 let startedAt = 0;    // 재생 시작 시점의 audioCtx.currentTime
 let isPlaying = false;
+
+// ── 화면 전환 ────────────────────────────────────────────────
+function showView(name) {
+  document.getElementById('homeView').style.display = name === 'home' ? 'block' : 'none';
+  document.getElementById('mixerView').style.display = name === 'mixer' ? 'block' : 'none';
+}
+
+function goHome() {
+  // 믹서를 떠나면 재생을 멈추고 리소스를 정리한다
+  stopSources();
+  Object.values(gains).forEach(g => g.disconnect());
+  trackIds = [];
+  buffers = {};
+  gains = {};
+  duration = 0;
+  pausedAt = 0;
+  isPlaying = false;
+  document.getElementById('status').innerText = '';
+  showView('home');
+  refreshSongs();
+}
+
+// ── 곡 리스트 (주기적으로 서버와 동기화) ─────────────────────
+async function refreshSongs() {
+  let data;
+  try {
+    const res = await fetch('/songs');
+    data = await res.json();
+  } catch (e) {
+    return;   // 서버 접속 실패 → 다음 폴링에서 재시도
+  }
+  document.getElementById('workerBanner').style.display =
+    data.worker_online ? 'none' : 'block';
+
+  const list = document.getElementById('songList');
+  list.innerHTML = '';
+
+  // 진행 중/실패한 작업을 리스트 맨 위에 표시
+  data.jobs.forEach(job => {
+    const row = document.createElement('div');
+    row.className = 'song-row';
+
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = job.song_name;
+    row.appendChild(title);
+
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    sub.textContent = JOB_STATUS_LABELS[job.status] || job.status;
+    row.appendChild(sub);
+
+    if (job.status === 'failed') {
+      if (job.error) {
+        const err = document.createElement('span');
+        err.className = 'error';
+        err.textContent = job.error;
+        err.title = job.error;   // 마우스를 올리면 전체 메시지 표시
+        row.appendChild(err);
+      }
+      const retryBtn = document.createElement('button');
+      retryBtn.textContent = '재시도';
+      retryBtn.onclick = () => submitVideoId(job.song_name);
+      row.appendChild(retryBtn);
+    }
+    list.appendChild(row);
+  });
+
+  // 들을 수 있는 곡 (클릭 → 믹서 화면)
+  data.songs.forEach(song => {
+    const row = document.createElement('div');
+    row.className = 'song-row playable';
+    row.onclick = () => openSong(song);
+
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = song.title;
+    row.appendChild(title);
+
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    sub.textContent = `악기 ${song.tracks.length}개 ▶`;
+    row.appendChild(sub);
+
+    list.appendChild(row);
+  });
+
+  if (!data.jobs.length && !data.songs.length) {
+    list.innerHTML = '<div id="emptyList">아직 분리된 곡이 없습니다. 위에 유튜브 링크를 넣어 곡을 추가해보세요.</div>';
+  }
+}
+
+// ── 새 곡 추가 (분리 요청) ───────────────────────────────────
+async function submitUrl() {
+  const url = document.getElementById('youtubeUrl').value.trim();
+  if (!url) return alert('유튜브 링크를 입력해주세요.');
+  await requestProcess(url);
+}
+
+function submitVideoId(videoId) {
+  return requestProcess(`https://youtu.be/${videoId}`);
+}
+
+async function requestProcess(url) {
+  const status = document.getElementById('status');
+  const uploadBtn = document.getElementById('uploadBtn');
+  uploadBtn.disabled = true;
+  try {
+    // 같은 서버에서 서빙되므로 상대 경로로 요청 (배포 시 수정 불필요)
+    const response = await fetch('/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '서버 오류');
+
+    if (data.status === 'done') {
+      // 이미 분리된 곡 → 바로 믹서로
+      document.getElementById('youtubeUrl').value = '';
+      await openSong(data);
+      return;
+    }
+    // 큐에 등록됨 → 리스트에 '분리 중' 항목으로 나타난다
+    document.getElementById('youtubeUrl').value = '';
+    status.innerText = data.worker_online === false
+      ? '큐에 등록했습니다. 분리 PC가 켜지면 분리가 시작됩니다.'
+      : '큐에 등록했습니다. 분리가 끝나면 리스트에서 재생할 수 있습니다 (1~5분 소요).';
+    refreshSongs();
+  } catch (err) {
+    status.innerText = '오류: ' + err.message;
+  } finally {
+    uploadBtn.disabled = false;
+  }
+}
+
+// ── 곡 열기: 스템 로드 후 믹서 화면으로 전환 ─────────────────
+async function openSong(song) {
+  const status = document.getElementById('status');
+  status.innerText = `오디오 데이터를 불러오는 중... — ${song.title}`;
+  try {
+    stopSources();
+    buildMixer(song.tracks);
+
+    // 감지된 트랙을 병렬로 다운로드 + 디코딩
+    await Promise.all(song.tracks.map(async ({ id, file }) => {
+      const res = await fetch(`/audio/${encodeURIComponent(song.song_name)}/${file}`);
+      if (!res.ok) throw new Error(`${id} 트랙 로드 실패`);
+      buffers[id] = await audioCtx.decodeAudioData(await res.arrayBuffer());
+    }));
+
+    duration = Math.max(...trackIds.map(id => buffers[id].duration));
+    document.getElementById('seek').max = duration;
+    pausedAt = 0;
+    isPlaying = false;
+    updateTransportUI();
+
+    const detected = trackIds.map(id => (TRACK_LABELS[id] || id).replace(/^\S+ /, '')).join(', ');
+    status.innerText = `감지된 악기: ${detected}`;
+    document.getElementById('songTitle').textContent = song.title;
+    showView('mixer');
+  } catch (err) {
+    status.innerText = '오류: ' + err.message;
+  }
+}
 
 // ── 감지된 악기별 볼륨 슬라이더 UI 생성 (곡을 불러올 때마다 재구성) ──
 function buildMixer(tracks) {
@@ -116,60 +331,9 @@ function buildMixer(tracks) {
   });
 }
 
-// ── 유튜브 다운로드 및 음원 분리 ─────────────────────────────
-async function uploadAndProcess() {
-  const url = document.getElementById('youtubeUrl').value.trim();
-  if (!url) return alert('유튜브 링크를 입력해주세요.');
-
-  const status = document.getElementById('status');
-  const uploadBtn = document.getElementById('uploadBtn');
-  uploadBtn.disabled = true;
-
-  try {
-    status.innerText = '유튜브에서 음원을 받아 AI가 악기를 분리하고 있습니다... (곡 길이에 따라 1~5분 소요)';
-
-    // 같은 서버에서 서빙되므로 상대 경로로 요청 (배포 시 수정 불필요)
-    const response = await fetch('/process', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '서버 오류');
-
-    status.innerText = (data.cached
-      ? '이미 분리된 곡입니다. 오디오를 불러오는 중...'
-      : '분리 완료! 오디오 데이터를 불러오는 중...') + ` — ${data.title}`;
-
-    stopSources();
-    buildMixer(data.tracks);
-
-    // 감지된 트랙을 병렬로 다운로드 + 디코딩
-    await Promise.all(data.tracks.map(async ({ id, file }) => {
-      const res = await fetch(`/audio/${encodeURIComponent(data.song_name)}/${file}`);
-      if (!res.ok) throw new Error(`${id} 트랙 로드 실패`);
-      buffers[id] = await audioCtx.decodeAudioData(await res.arrayBuffer());
-    }));
-
-    duration = Math.max(...trackIds.map(id => buffers[id].duration));
-    document.getElementById('seek').max = duration;
-    pausedAt = 0;
-    isPlaying = false;
-    updateTransportUI();
-
-    const detected = trackIds.map(id => (TRACK_LABELS[id] || id).replace(/^\S+ /, '')).join(', ');
-    status.innerText = `재생 준비 완료! — ${data.title} (감지된 악기: ${detected})`;
-    document.getElementById('mixer').style.display = 'block';
-  } catch (err) {
-    status.innerText = '오류: ' + err.message;
-  } finally {
-    uploadBtn.disabled = false;
-  }
-}
-
 // ── 서버에 저장된 음원 전체 삭제 ─────────────────────────────
 async function clearAll() {
-  if (!confirm('서버에 저장된 모든 음원(다운로드 원본 + 분리 결과)을 삭제할까요?')) return;
+  if (!confirm('서버에 저장된 모든 곡(분리 결과)을 삭제할까요?')) return;
 
   const status = document.getElementById('status');
   const clearBtn = document.getElementById('clearBtn');
@@ -179,18 +343,8 @@ async function clearAll() {
     const response = await fetch('/clear', { method: 'POST' });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '서버 오류');
-
-    // 재생 중이던 곡도 함께 정리하고 믹서를 숨긴다
-    stopSources();
-    Object.values(gains).forEach(g => g.disconnect());
-    trackIds = [];
-    buffers = {};
-    gains = {};
-    duration = 0;
-    pausedAt = 0;
-    isPlaying = false;
-    document.getElementById('mixer').style.display = 'none';
-    status.innerText = '서버의 모든 음원을 삭제했습니다.';
+    status.innerText = '서버의 모든 곡을 삭제했습니다.';
+    refreshSongs();
   } catch (err) {
     status.innerText = '오류: ' + err.message;
   } finally {
@@ -278,6 +432,10 @@ function updateTransportUI() {
 }
 
 setInterval(() => { if (isPlaying) updateTransportUI(); }, 200);
+
+// ── 초기화: 리스트를 즉시 불러오고 주기적으로 갱신 ───────────
+refreshSongs();
+setInterval(refreshSongs, POLL_MS);
 </script>
 
 </body>

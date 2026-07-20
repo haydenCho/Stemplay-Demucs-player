@@ -47,6 +47,7 @@ EC2에 **주기적으로 폴링(pull)** 하는 방식을 쓴다 — 아웃바운
 
 ```
 band-mixer/
+├── run.sh             # 설치 확인 + 백그라운드 실행 스크립트 (server / worker / 둘 다)
 ├── server.py          # EC2용 Flask 서버 (웹 서빙 + 작업 큐 + 결과 저장/제공)
 │                      #   torch/demucs/yt-dlp 불필요 → t2.micro에서도 가볍게 동작
 ├── worker.py          # 홈 PC용 워커 (큐 폴링 → yt-dlp → Demucs → 악기 감지 → 업로드)
@@ -76,39 +77,38 @@ band-mixer/
 
 ## 설치 및 실행
 
-### 1. EC2 (서버)
+`run.sh` 하나로 설치 확인부터 백그라운드 실행까지 처리한다.
+실행할 때마다 **기존 프로세스를 자동 종료하고 새로 시작**하므로
+재시작 용도로도 그냥 다시 실행하면 되고, 여러 번 실행해도 안전하다.
 
-분리 작업을 하지 않으므로 Flask만 있으면 된다. torch, demucs, yt-dlp, ffmpeg 전부 불필요.
+### 1. EC2 (서버)
 
 ```bash
 cd ~/band-mixer
-python3 -m venv .venv && source .venv/bin/activate
-pip install flask gunicorn
-
 export WORKER_TOKEN='아무거나-길고-추측불가능한-문자열'
-gunicorn -b 0.0.0.0:5000 server:app
+./run.sh server
 ```
 
+- 분리 작업을 하지 않으므로 flask + gunicorn만 설치된다
+  (torch, demucs, yt-dlp, ffmpeg, node 전부 불필요).
 - 보안 그룹에서 5000 포트를 **내 IP + 집 IP**에만 열 것
   (브라우저 접속용 + 워커 폴링용. 나만 쓰는 서비스이므로 전체 공개 금지).
-- 분리 작업이 서버에서 빠졌으므로 gunicorn timeout을 길게 잡을 필요가 없다.
+- 로그: `tail -f server.log`
 
 ### 2. 홈 PC — WSL Ubuntu (워커)
 
 ```bash
 cd ~/Music/band-mixer
-./setup.sh --setup-only        # ffmpeg, venv, yt-dlp, demucs(torch) 설치
-
-source .venv/bin/activate
 export EC2_URL='http://<EC2-주소>:5000'
 export WORKER_TOKEN='EC2와 동일한 문자열'
-python worker.py
+./run.sh worker
 ```
 
-- 워커는 무한 루프로 EC2를 폴링한다. 백그라운드로 띄우려면:
-  `nohup python worker.py > worker.log 2>&1 &`
+- 필요한 시스템 패키지(ffmpeg, **node** — yt-dlp의 유튜브 추출용 JS 런타임)와
+  파이썬 패키지(demucs 등)를 자동으로 확인·설치한 뒤 워커를 백그라운드로 띄운다.
 - 첫 분리 시 htdemucs_6s 모델(약 80MB)이 `~/.cache/torch/`에 자동 다운로드된다.
 - GPU(NVIDIA + CUDA)가 있으면 분리가 수십 배 빠르다. CPU만으로도 동작은 한다.
+- 로그: `tail -f worker.log`
 
 ### 3. 사용
 
@@ -128,17 +128,16 @@ python worker.py
 서버와 워커를 같은 PC에서 둘 다 띄우면 v1처럼 로컬 단독으로 쓸 수 있다.
 
 ```bash
-# 터미널 1
-export WORKER_TOKEN=dev
-python server.py
-
-# 터미널 2
-export EC2_URL='http://localhost:5000'
-export WORKER_TOKEN=dev
-python worker.py
+./run.sh        # 서버 + 워커 모두 백그라운드 실행 (WORKER_TOKEN은 기본값 dev 사용)
 ```
 
 브라우저에서 http://localhost:5000 접속. WSL의 경우 윈도우 브라우저에서 바로 접속 가능하다.
+
+```bash
+# 종료
+pkill -f 'gunicorn.*server:app'       # 서버
+pkill -f 'python3? .*worker\.py'      # 워커
+```
 
 ## 배포 시 참고
 
