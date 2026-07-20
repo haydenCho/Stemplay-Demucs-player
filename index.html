@@ -186,6 +186,7 @@ async function refreshSongs() {
   let data;
   try {
     const res = await fetch('/songs');
+    if (res.status === 401) { location.href = '/login'; return; }  // 세션 만료 → 재로그인
     data = await res.json();
   } catch (e) {
     return;   // 서버 접속 실패 → 다음 폴링에서 재시도

@@ -97,22 +97,40 @@ band-mixer/
 | `WORKER_TOKEN` | `dev` | 서버-워커 공유 시크릿. 로컬 개발이 아니면 반드시 변경 |
 | `EC2_URL` | `http://localhost:5000` | 워커가 바라볼 서버 주소 |
 | `PORT` | `5000` | 서버 포트 |
+| `WEB_PASSWORD` | (없음) | 웹 UI 비밀번호. 비우면 인증 없음 — EC2 운영 시 반드시 설정 |
+| `SECRET_KEY` | (부팅마다 랜덤) | 세션 쿠키 서명 키. 미설정 시 서버 재시작마다 재로그인 필요 |
+| `NGINX_ACCEL` | (꺼짐) | `1`이면 오디오 서빙을 nginx에 위임 (`setup-nginx.sh` 적용 시) |
+| `BIND` | `0.0.0.0` | gunicorn 바인드 주소. nginx 뒤에서는 `127.0.0.1` |
 
 ### 케이스 A — 운영 구성 (권장): EC2 서버 + 홈 PC 워커
 
-**EC2에서** (서버만):
+**EC2에서** (서버만). 도메인 + certbot 인증서가 있다는 전제로,
+nginx가 443에서 SSL을 받아 gunicorn(127.0.0.1:5000)으로 프록시한다.
+웹 UI는 비밀번호(세션 쿠키 30일)로 보호되므로 어느 IP에서나 —
+폰 LTE 포함 — 접속할 수 있다.
 
 ```bash
 cd ~/band-mixer
 cp .env.example .env
-# .env에서 WORKER_TOKEN을 길고 추측 불가능한 문자열로 변경
+# .env 설정:
+#   WORKER_TOKEN=<길고 추측 불가능한 문자열>
+#   WEB_PASSWORD=<웹 접속 비밀번호>
+#   SECRET_KEY=<openssl rand -hex 32 결과>
+#   NGINX_ACCEL=1
+#   BIND=127.0.0.1
+sudo ./setup-nginx.sh     # nginx 사이트 설정 생성 + 리로드
 ./run.sh server
 ```
 
 - 분리 작업을 하지 않으므로 flask + gunicorn만 설치된다
   (torch, demucs, yt-dlp, ffmpeg, node 전부 불필요).
-- 보안 그룹에서 5000 포트를 **내 IP + 집 IP**에만 열 것
-  (브라우저 접속용 + 워커 폴링용. 나만 쓰는 서비스이므로 전체 공개 금지).
+- 보안 그룹 인바운드는 **443(과 80)만 전체 공개**하고 5000은 닫는다
+  (gunicorn은 127.0.0.1에만 바인드되므로 이중으로 안전).
+- 분리된 오디오는 nginx가 직접 서빙한다 — server.py가 세션 확인 후
+  `X-Accel-Redirect`로 위임하므로 인증을 우회하지 않으면서 Range 요청
+  (재생 위치 탐색)이 빠르다.
+- 워커 API(`/worker/*`)는 비밀번호가 아니라 토큰으로 인증하므로
+  로그인 없이 동작한다.
 - 로그: `tail -f server.log`
 
 **홈 PC(WSL Ubuntu)에서** (워커만):
@@ -120,7 +138,7 @@ cp .env.example .env
 ```bash
 cd ~/Music/band-mixer
 cp .env.example .env
-# .env에서 EC2_URL='http://<EC2-주소>:5000', WORKER_TOKEN='EC2와 동일한 값'으로 변경
+# .env에서 EC2_URL='https://<도메인>', WORKER_TOKEN='EC2와 동일한 값'으로 변경
 ./run.sh worker
 ```
 

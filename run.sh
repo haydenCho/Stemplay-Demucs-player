@@ -13,6 +13,10 @@
 #   WORKER_TOKEN  서버-워커 공유 시크릿 (기본값 dev — 로컬 개발용. EC2 운영 시 반드시 변경)
 #   EC2_URL       워커가 바라볼 서버 주소 (기본값 http://localhost:5000)
 #   PORT          서버 포트 (기본값 5000)
+#   BIND          gunicorn 바인드 주소 (기본값 0.0.0.0 — nginx 뒤에서는 127.0.0.1 권장)
+#   WEB_PASSWORD  웹 UI 비밀번호 (비우면 인증 없음 — 로컬 개발용. EC2 운영 시 반드시 설정)
+#   SECRET_KEY    세션 쿠키 서명 키 (openssl rand -hex 32 로 생성)
+#   NGINX_ACCEL   1이면 오디오 서빙을 nginx에 위임 (setup-nginx.sh 적용 시)
 
 set -euo pipefail
 
@@ -33,6 +37,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
 fi
 
 PORT="${PORT:-5000}"
+BIND="${BIND:-0.0.0.0}"
 WORKER_TOKEN="${WORKER_TOKEN:-dev}"
 EC2_URL="${EC2_URL:-http://localhost:$PORT}"
 
@@ -118,9 +123,12 @@ if [ "$ROLE" != "worker" ]; then
     if [ "$WORKER_TOKEN" = "dev" ]; then
         echo "⚠️  WORKER_TOKEN이 기본값(dev)입니다 — 로컬 개발용. EC2에서는 반드시 바꿔서 실행하세요."
     fi
+    if [ -z "${WEB_PASSWORD:-}" ]; then
+        echo "⚠️  WEB_PASSWORD가 비어 있어 웹 인증 없이 실행됩니다 — 로컬 개발용. EC2에서는 반드시 설정하세요."
+    fi
     info "서버 시작 (백그라운드) → http://localhost:$PORT"
     WORKER_TOKEN="$WORKER_TOKEN" nohup "$VENV_DIR/bin/gunicorn" \
-        -b "0.0.0.0:$PORT" --threads 4 server:app \
+        -b "$BIND:$PORT" --threads 4 server:app \
         > "$SCRIPT_DIR/server.log" 2>&1 &
     SERVER_PID=$!
 

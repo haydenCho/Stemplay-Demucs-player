@@ -14,9 +14,11 @@ import re
 import shutil
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import (Flask, Response, jsonify, redirect, render_template_string,
+                   request, send_from_directory, session)
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "separated"
@@ -34,6 +36,8 @@ if (BASE_DIR / ".env").exists():
             os.environ.setdefault(_key.strip(), _val.strip().strip("'\""))
 
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")   # 워커 인증용 공유 시크릿
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")   # 웹 UI 비밀번호 (비우면 인증 없음 — 로컬 개발용)
+NGINX_ACCEL = os.environ.get("NGINX_ACCEL") == "1"  # 오디오 서빙을 nginx에 위임 (setup-nginx.sh 참고)
 WORKER_ONLINE_WINDOW = 30.0                         # 마지막 폴링이 이 초 이내면 '워커 켜짐'
 JOB_STALE_SECONDS = 30 * 60                         # processing이 이보다 오래되면 워커가 죽은 것 → 재배정
 
@@ -46,6 +50,12 @@ YOUTUBE_ID_RE = re.compile(
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 app = Flask(__name__)
+
+# 세션 쿠키 서명 키. SECRET_KEY 미설정 시 부팅마다 랜덤 → 서버 재시작하면 재로그인 필요.
+# (run.sh는 gunicorn을 워커 프로세스 1개 + 스레드로 띄우므로 랜덤 키도 정상 동작한다)
+app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
+app.permanent_session_lifetime = timedelta(days=30)
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 # 작업 큐. 단일 사용자 서비스라 메모리로 충분하다 (gunicorn 기본 워커 1개 기준).
 # 서버가 재시작되면 대기 중이던 작업은 사라지므로 링크를 다시 제출하면 된다.
@@ -91,6 +101,57 @@ def require_worker_token():
         return jsonify({"error": "워커 토큰이 일치하지 않습니다."}), 403
     worker_last_seen = time.time()
     return None
+
+
+# ------------------------------------------------------------------- 웹 인증
+
+LOGIN_HTML = """<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>밴드 믹서 - 로그인</title>
+<style>
+  body { font-family: sans-serif; background: #111; color: #eee; margin: 0;
+         display: flex; justify-content: center; align-items: center; height: 100vh; }
+  form { background: #1c1c1c; padding: 2rem; border-radius: 12px; text-align: center; }
+  input { font-size: 1rem; padding: .6rem .8rem; border-radius: 8px;
+          border: 1px solid #444; background: #111; color: #eee; }
+  button { font-size: 1rem; padding: .6rem 1rem; border-radius: 8px; border: 0;
+           background: #4a7dff; color: #fff; cursor: pointer; margin-left: .3rem; }
+  .error { color: #ff7676; margin-top: .8rem; font-size: .9rem; }
+</style></head><body>
+<form method="post">
+  <h2>🎛️ 밴드 믹서</h2>
+  <input type="password" name="password" placeholder="비밀번호" autofocus>
+  <button>입장</button>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+</form></body></html>"""
+
+
+@app.before_request
+def require_login():
+    """웹 UI 비밀번호 인증. WEB_PASSWORD가 비어 있으면 비활성 (로컬 개발)."""
+    if not WEB_PASSWORD:
+        return None
+    path = request.path
+    if path == "/login" or path.startswith("/worker/"):
+        return None                     # 로그인 페이지와 워커 API(토큰 인증)는 제외
+    if session.get("authed"):
+        return None
+    if path == "/":
+        return redirect("/login")       # 페이지 접속 → 로그인 화면으로
+    return jsonify({"error": "로그인이 필요합니다."}), 401   # API 호출 → 401 (JS가 처리)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template_string(LOGIN_HTML, error=None)
+    if WEB_PASSWORD and hmac.compare_digest(request.form.get("password", ""), WEB_PASSWORD):
+        session.permanent = True        # 쿠키 30일 유지 → 폰에서 매번 입력 안 해도 됨
+        session["authed"] = True
+        return redirect("/")
+    time.sleep(1)                       # 무차별 대입 속도 제한
+    return render_template_string(LOGIN_HTML, error="비밀번호가 올바르지 않습니다."), 403
 
 
 # ---------------------------------------------------------------- 브라우저 API
@@ -161,6 +222,15 @@ def status(video_id: str):
 
 @app.get("/audio/<song_name>/<track_name>")
 def audio(song_name: str, track_name: str):
+    # nginx 뒤에서는 세션 확인만 하고 파일 전송은 nginx에 위임한다
+    # (X-Accel-Redirect → internal location이 직접 서빙, Range 지원으로 탐색이 빠름)
+    if NGINX_ACCEL:
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{11}", song_name)
+                or track_name not in {f"{t}.{EXT}" for t in ALL_TRACKS}):
+            return jsonify({"error": "잘못된 경로입니다."}), 404
+        resp = Response()
+        resp.headers["X-Accel-Redirect"] = f"/_audio/{song_name}/{track_name}"
+        return resp
     # send_from_directory는 내부적으로 safe_join을 사용해 경로 탈출을 막는다
     return send_from_directory(OUTPUT_DIR / MODEL / song_name, track_name)
 
