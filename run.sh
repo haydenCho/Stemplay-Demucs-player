@@ -9,7 +9,7 @@
 # 실행할 때마다 해당 역할의 기존 프로세스를 자동 종료하고 새로 시작하므로
 # 재시작 용도로도 그냥 다시 실행하면 된다. 여러 번 실행해도 안전하다.
 #
-# 환경변수:
+# 환경변수 (.env 파일에 적어두면 자동 로드된다 — .env.example 참고):
 #   WORKER_TOKEN  서버-워커 공유 시크릿 (기본값 dev — 로컬 개발용. EC2 운영 시 반드시 변경)
 #   EC2_URL       워커가 바라볼 서버 주소 (기본값 http://localhost:5000)
 #   PORT          서버 포트 (기본값 5000)
@@ -19,6 +19,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 ROLE="${1:-all}"
+
+# .env 파일이 있으면 읽어서 환경변수로 등록한다 (export로 이미 설정된 값이 우선).
+# WORKER_TOKEN 같은 시크릿은 깃에 올리지 말고 .env에 보관할 것 (.gitignore 등록됨).
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|\#*) continue ;; esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+        [ -n "${!key:-}" ] || export "$key=$val"
+    done < "$SCRIPT_DIR/.env"
+fi
+
 PORT="${PORT:-5000}"
 WORKER_TOKEN="${WORKER_TOKEN:-dev}"
 EC2_URL="${EC2_URL:-http://localhost:$PORT}"

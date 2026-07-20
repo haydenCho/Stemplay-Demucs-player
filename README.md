@@ -73,7 +73,7 @@ band-mixer/
 | `POST /worker/fail/<영상ID>` | 워커 | 실패 보고 (에러 메시지 포함) |
 
 `/worker/*` 엔드포인트는 공유 시크릿 토큰(`X-Worker-Token` 헤더)으로 인증한다.
-토큰은 EC2와 PC 양쪽에서 환경변수 `WORKER_TOKEN`으로 설정하며, 값이 일치해야 한다.
+토큰은 EC2와 PC 양쪽에서 `.env` 파일의 `WORKER_TOKEN`으로 설정하며, 값이 일치해야 한다.
 
 ## 설치 및 실행
 
@@ -87,7 +87,10 @@ band-mixer/
 | `./run.sh server` | 서버만 |
 | `./run.sh worker` | 워커만 |
 
-환경변수 (실행 전에 `export`로 설정):
+환경변수 — 프로젝트 루트의 `.env` 파일에 적어두면 자동 로드된다
+(`cp .env.example .env` 후 수정). `.env`는 `.gitignore`에 등록돼 있어
+깃에 올라가지 않으므로 시크릿은 여기에 보관한다. `export`로 직접 설정한
+값이 `.env`보다 우선한다.
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
@@ -101,7 +104,8 @@ band-mixer/
 
 ```bash
 cd ~/band-mixer
-export WORKER_TOKEN='아무거나-길고-추측불가능한-문자열'
+cp .env.example .env
+# .env에서 WORKER_TOKEN을 길고 추측 불가능한 문자열로 변경
 ./run.sh server
 ```
 
@@ -115,8 +119,8 @@ export WORKER_TOKEN='아무거나-길고-추측불가능한-문자열'
 
 ```bash
 cd ~/Music/band-mixer
-export EC2_URL='http://<EC2-주소>:5000'
-export WORKER_TOKEN='EC2와 동일한 문자열'
+cp .env.example .env
+# .env에서 EC2_URL='http://<EC2-주소>:5000', WORKER_TOKEN='EC2와 동일한 값'으로 변경
 ./run.sh worker
 ```
 
@@ -142,7 +146,7 @@ cd ~/Music/band-mixer
 
 ```bash
 cd ~/band-mixer
-export WORKER_TOKEN='아무거나-길고-추측불가능한-문자열'
+cp .env.example .env   # WORKER_TOKEN을 길고 추측 불가능한 문자열로 변경
 ./run.sh
 ```
 

@@ -28,6 +28,7 @@ Thumbs.db
 .idea/
 .vscode/
 
-# 환경 변수
+# 환경 변수 (.env.example은 템플릿이므로 커밋)
 .env
 .env.*
+!.env.example

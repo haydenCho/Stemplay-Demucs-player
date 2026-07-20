@@ -29,6 +29,15 @@ ALL_TRACKS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
 EXT = "mp3"                                         # --mp3 출력 (WAV 대비 용량 1/10)
 SILENCE_MEAN_DB = -45.0                             # 평균 음량이 이보다 작으면 '없는 악기'로 판정
 
+# .env 파일이 있으면 읽어서 환경변수로 등록한다 (export로 이미 설정된 값이 우선).
+# WORKER_TOKEN 같은 시크릿을 깃에 올리지 않기 위함 — .env는 .gitignore에 있다.
+if (BASE_DIR / ".env").exists():
+    for _line in (BASE_DIR / ".env").read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _key, _, _val = _line.partition("=")
+            os.environ.setdefault(_key.strip(), _val.strip().strip("'\""))
+
 EC2_URL = os.environ.get("EC2_URL", "http://localhost:5000").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 POLL_INTERVAL = 3                                   # 작업이 없을 때 재폴링 간격 (초)
