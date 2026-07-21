@@ -170,7 +170,16 @@ def main():
             time.sleep(RETRY_INTERVAL)
             continue
 
-        video_id = resp.json()["video_id"]
+        # 정상 작업 응답은 {"video_id": ...} JSON이다. 게이트웨이(nginx 등)가
+        # 200으로 비-JSON 본문(HTML 에러 페이지 등)을 뱉으면 파싱이 터지는데,
+        # 이 줄이 try 밖에 있으면 워커 전체가 죽으므로 여기서 방어한다.
+        try:
+            video_id = resp.json()["video_id"]
+        except (ValueError, KeyError) as e:
+            log(f"작업 응답 파싱 실패({e.__class__.__name__}) — {RETRY_INTERVAL}초 후 재시도")
+            time.sleep(RETRY_INTERVAL)
+            continue
+
         log(f"작업 시작: {video_id}")
         try:
             meta = separate(video_id)
