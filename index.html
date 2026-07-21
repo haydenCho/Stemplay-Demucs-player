@@ -228,6 +228,13 @@ async function refreshSongs() {
       retryBtn.onclick = () => submitVideoId(job.song_name);
       row.appendChild(retryBtn);
     }
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.innerHTML = iconLabel('🗑', '삭제');
+    deleteBtn.style.background = '#dc2626';
+    deleteBtn.onclick = () => deleteSong(job.song_name);
+    row.appendChild(deleteBtn);
+
     list.appendChild(row);
   });
 
@@ -246,6 +253,12 @@ async function refreshSongs() {
     sub.className = 'sub';
     sub.innerHTML = `<span class="btn-text">악기 </span>${song.tracks.length}<span class="btn-text">개</span> ▶`;
     row.appendChild(sub);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.innerHTML = iconLabel('🗑', '삭제');
+    deleteBtn.style.background = '#dc2626';
+    deleteBtn.onclick = (e) => { e.stopPropagation(); deleteSong(song.song_name); };
+    row.appendChild(deleteBtn);
 
     list.appendChild(row);
   });
@@ -353,6 +366,22 @@ function buildMixer(tracks) {
     gain.connect(audioCtx.destination);
     gains[id] = gain;
   });
+}
+
+// ── 곡 하나만 삭제 ───────────────────────────────────────────
+async function deleteSong(videoId) {
+  if (!confirm('이 곡을 삭제할까요?')) return;
+
+  const status = document.getElementById('status');
+  try {
+    const response = await fetch(`/songs/${encodeURIComponent(videoId)}`, { method: 'DELETE' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '서버 오류');
+    status.innerText = '곡을 삭제했습니다.';
+    refreshSongs();
+  } catch (err) {
+    status.innerText = '오류: ' + err.message;
+  }
 }
 
 // ── 서버에 저장된 음원 전체 삭제 ─────────────────────────────

@@ -252,6 +252,19 @@ def clear():
     return jsonify({"ok": True})
 
 
+@app.delete("/songs/<video_id>")
+def delete_song(video_id: str):
+    # 곡 하나만 삭제: 분리 결과 폴더와 대기/실패 중인 작업 큐 항목을 함께 정리한다
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return jsonify({"error": "올바른 영상 ID가 아닙니다."}), 400
+    with jobs_lock:
+        jobs.pop(video_id, None)
+    dest = song_dir(video_id)
+    if dest.exists():
+        shutil.rmtree(dest)
+    return jsonify({"ok": True})
+
+
 # ------------------------------------------------------------------ 워커 API
 
 @app.get("/worker/job")
